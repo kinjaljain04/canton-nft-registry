@@ -1,34 +1,32 @@
-# canton-nft-registry
+# Canton NFT Registry
 
-## Overview
+This project provides a comprehensive NFT lifecycle implementation on the Canton Network using Daml smart contracts. It covers key NFT functionalities, including minting, royalty enforcement, transfer mechanisms, fixed-price listings, and over-the-counter (OTC) trading.
 
-This project implements a complete NFT lifecycle on the Canton Network using Daml smart contracts. It includes functionality for:
+## Features
 
-*   **NFT Minting:** Creation of new NFTs with owner assignment and metadata anchoring.
-*   **NFT Transfer:** Secure transfer of NFTs between parties, enforcing royalty payments.
-*   **Royalty Enforcement:**  Automated royalty distribution on every NFT transfer.
-*   **Fixed-Price Listings:**  Simple marketplace functionality for listing NFTs for sale at a fixed price.
-*   **Offer/Accept Flow:** Over-the-counter (OTC) trading mechanism using an offer and acceptance protocol.
-*   **Metadata Anchoring:** Linking off-chain NFT metadata to on-chain content hashes for integrity.
+*   **NFT Minting:** Allows authorized parties to create new NFTs with associated metadata hash.
+*   **Royalty Enforcement:** Automatically enforces royalty payments on every transfer.
+*   **Transfer Mechanism:** Secure NFT transfer between parties with royalty distribution.
+*   **Fixed-Price Listings:** Enables users to list NFTs for sale at a fixed price.
+*   **OTC Trading (Offer/Accept):** Facilitates direct, peer-to-peer NFT trading via an offer/accept flow.
+*   **Off-Chain Metadata with On-Chain Content Hash:** NFT metadata is stored off-chain, while the content hash is securely anchored on-chain for verification.
 
-## Project Structure
+## Architecture
 
-The project is organized into several Daml modules, each responsible for a specific aspect of the NFT lifecycle:
+The project is built with Daml smart contracts to ensure secure and transparent NFT operations.  Key components include:
 
-*   `NFT.daml`: Core NFT contract definition, including minting and basic transfer functionalities.
-*   `Royalty.daml`: Royalty enforcement logic, defining royalty rates and distribution mechanisms.
-*   `Listing.daml`:  Fixed-price listing contracts, enabling users to list their NFTs for sale.
-*   `Offer.daml`: Offer/Accept flow for OTC trades, including offer creation, acceptance, and cancellation.
-*   `Metadata.daml`: Defines the data structure for off-chain NFT metadata and its on-chain hash representation.
-*   `Util.daml`: Utility functions and common data types used across the project.
-*   `Script.daml`: Daml script containing tests to run against the smart contracts.
+*   **NFT Contract:** Represents the NFT and its core attributes, including owner, royalty information, and metadata hash.
+*   **Royalty Contract:** Manages royalty distribution on transfers.
+*   **Listing Contract:** Handles fixed-price listings and sale execution.
+*   **Offer Contract:** Facilitates OTC trading through an offer/accept workflow.
 
 ## Getting Started
 
 ### Prerequisites
 
-*   Daml SDK (version 3.1.0 or later)
-*   Canton Network setup (optional for local testing, required for Canton deployment)
+*   Daml SDK (version 3.1.0)
+*   Canton Network access
+*   Node.js and npm (for UI or client applications)
 
 ### Installation
 
@@ -45,43 +43,55 @@ The project is organized into several Daml modules, each responsible for a speci
     daml build
     ```
 
-### Running Tests
+### Running the Application
 
-1.  Execute the Daml script to run the tests:
+Instructions for deploying the Daml package to the Canton Network and interacting with the contracts will be provided separately. These instructions would typically involve:
 
-    ```bash
-    daml script Script.daml
-    ```
+1.  Starting the Canton Network.
+2.  Deploying the DAR file (`.dar`) to the Canton Network.
+3.  Using the Canton JSON API or a Daml ledger client to interact with the contracts.
 
-### Deployment
+### Example Usage (Conceptual)
 
-1.  Create a DAR file:
+1.  **Mint an NFT:**
+    *   An authorized party mints an NFT, providing the owner, royalty recipient, royalty rate, and a hash of the NFT metadata.
 
-    ```bash
-    daml build
-    ```
+2.  **Transfer an NFT:**
+    *   The owner initiates a transfer to another party.
+    *   The royalty amount is calculated based on the royalty rate.
+    *   The royalty is automatically distributed to the royalty recipient.
+    *   The NFT ownership is updated.
 
-    This will generate a `.dar` file in the project directory.
+3.  **List an NFT for Sale:**
+    *   The owner lists the NFT for sale at a fixed price.
 
-2.  Deploy the DAR file to your Canton network using the Canton console or API.
+4.  **OTC Trade:**
+    *   One party creates an offer to buy an NFT from another party.
+    *   The other party can accept or reject the offer.
+    *   If accepted, the NFT and the agreed-upon amount are exchanged.
 
-## Usage
+## Project Structure
 
-The contracts can be interacted with using the Daml ledger API.  You will need a suitable client library (e.g., the TypeScript ledger client) to interact with the deployed contracts.  Examples of how to create contracts, exercise choices, and query the ledger can be found in `Script.daml` and may be useful for constructing your own client applications.
+The project directory structure is organized as follows:
 
-## Security Considerations
-
-This project is provided as a reference implementation and has not undergone a formal security audit.  Before deploying to a production environment, it is highly recommended to conduct a thorough security review and address any potential vulnerabilities.  Specifically, consider:
-
-*   **Access Control:** Ensure that appropriate access controls are in place to prevent unauthorized parties from minting, transferring, or listing NFTs.
-*   **Royalty Enforcement:**  Verify that the royalty enforcement logic is robust and cannot be circumvented.
-*   **Data Validation:**  Implement thorough input validation to prevent malicious data from being stored on the ledger.
-*   **Denial-of-Service:**  Protect against potential denial-of-service attacks by limiting resource consumption.
+*   `daml/`: Contains the Daml source code for the NFT contracts.
+    *   `NFT.daml`: Core NFT contract definition.
+    *   `Royalty.daml`: Royalty management contracts.
+    *   `Listing.daml`: Fixed-price listing contracts.
+    *   `Offer.daml`: OTC trading contracts.
+*   `daml.yaml`: Daml project configuration file.
+*   `README.md`: Project overview and documentation.
 
 ## Contributing
 
-Contributions are welcome! Please submit pull requests with clear descriptions of the changes.
+Contributions are welcome! Please follow these guidelines:
+
+1.  Fork the repository.
+2.  Create a new branch for your feature or bug fix.
+3.  Implement your changes.
+4.  Test your changes thoroughly.
+5.  Submit a pull request.
 
 ## License
 
-[Specify the license here, e.g., Apache 2.0]
+This project is licensed under the [MIT License](LICENSE).
