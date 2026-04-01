@@ -1,0 +1,70 @@
+module NFT where
+
+import DA.Next.Set (Set)
+import qualified DA.Next.Set as Set
+
+-- | Configuration for royalty payments on secondary sales.
+-- This data is embedded in the NFT to ensure royalty information travels with the token.
+data RoyaltyConfig = RoyaltyConfig
+  with
+    recipient : Party  -- ^ The party who receives royalty payments.
+    rate : Decimal     -- ^ The royalty rate, e.g., 0.05 for 5%. Should be between 0.0 and 1.0.
+  deriving (Eq, Show)
+
+-- | Anchors the on-chain token to its off-chain metadata (e.g., image, attributes).
+-- This keeps the ledger light by storing bulk data off-chain, typically on IPFS.
+data Metadata = Metadata
+  with
+    contentHash : Text -- ^ A unique hash of the off-chain content (e.g., an IPFS CID).
+    uri : Optional Text -- ^ An optional direct URI to the metadata JSON file.
+  deriving (Eq, Show)
+
+-- | The core Non-Fungible Token template. It represents ownership of a unique digital asset
+-- and contains all necessary information for transfers and royalty calculations.
+template NonFungibleToken
+  with
+    issuer : Party         -- ^ The original creator of the NFT. This party is immutable.
+    owner : Party          -- ^ The current owner of the NFT. This party can transfer the token.
+    tokenId : Text         -- ^ A unique identifier for this token within the issuer's collection.
+    metadata : Metadata    -- ^ A link to the off-chain metadata.
+    royalty : RoyaltyConfig -- ^ Royalty configuration for secondary sales.
+    observers : Set Party  -- ^ Additional parties who can view the token contract.
+  where
+    signatory owner
+
+    observer issuer, royalty.recipient, Set.toList observers
+
+    ensure
+      -- The royalty rate must be a valid percentage between 0% and 100%.
+      royalty.rate >= 0.0 && royalty.rate <= 1.0
+
+    key (issuer, tokenId) : (Party, Text)
+    maintainer key._1
+
+    -- | A primitive choice to transfer ownership of the NFT to a new party.
+    -- This choice itself does not handle any payment or royalty enforcement. It is designed
+    -- to be called by higher-level contracts (like a Marketplace) that orchestrate a
+    -- delivery-vs-payment (DvP) transaction, including royalty distribution.
+    choice Transfer : ContractId NonFungibleToken
+      with
+        newOwner : Party
+      controller owner
+      do
+        assertMsg "New owner must be different from the current owner." (newOwner /= owner)
+        create this with owner = newOwner
+
+    -- | Allows the current owner to grant visibility of this token to another party.
+    choice AddObserver : ContractId NonFungibleToken
+      with
+        observerToAdd : Party
+      controller owner
+      do
+        create this with observers = Set.insert observerToAdd this.observers
+
+    -- | Allows the current owner to revoke visibility of this token from another party.
+    choice RemoveObserver : ContractId NonFungibleToken
+      with
+        observerToRemove : Party
+      controller owner
+      do
+        create this with observers = Set.delete observerToRemove this.observers
