@@ -1,0 +1,142 @@
+module Marketplace where
+
+import NFT
+
+-- | A proposal from an NFT owner to a marketplace to list their NFT for sale.
+-- This follows the standard proposal-acceptance pattern, ensuring both parties
+-- agree to the listing before it becomes active.
+template ListingProposal
+  with
+    seller : Party
+      -- ^ The owner of the NFT who wants to list it.
+    marketplace : Party
+      -- ^ The marketplace party that will host the listing.
+    nftCid : ContractId Token
+      -- ^ The contract ID of the NFT to be listed.
+    price : Decimal
+      -- ^ The asking price for the NFT.
+    currency : Text
+      -- ^ The currency of the price (e.g., "USD", "ETH").
+  where
+    signatory seller
+    observer marketplace
+
+    -- | The seller can cancel the proposal before the marketplace accepts it.
+    choice Cancel : ()
+      controller seller
+      do
+        pure ()
+
+    -- | The marketplace can accept the proposal, which creates an active `Listing` contract.
+    choice Accept : ContractId Listing
+      controller marketplace
+      do
+        -- Fetch the token to ensure the seller still owns it and to get its data.
+        nft <- fetch nftCid
+        assertMsg "Proposer must be the owner of the NFT at the time of listing." (nft.owner == seller)
+
+        create Listing with
+          seller
+          marketplace
+          nftCid
+          nftData = nft.data
+          price
+          currency
+
+-- | An active, fixed-price listing for an NFT on a marketplace. This contract
+-- represents an NFT that is available for immediate purchase at the specified price.
+template Listing
+  with
+    seller : Party
+      -- ^ The owner of the NFT.
+    marketplace : Party
+      -- ^ The marketplace party hosting the listing.
+    nftCid : ContractId Token
+      -- ^ The contract ID of the listed NFT.
+    nftData : TokenData
+      -- ^ A snapshot of the NFT's data for display purposes on a UI.
+    price : Decimal
+      -- ^ The fixed sale price.
+    currency : Text
+      -- ^ The currency of the price.
+  where
+    signatory seller, marketplace
+
+    key (seller, nftData.issuer, nftData.id) : (Party, Party, Text)
+    maintainer key._1
+
+    -- | The seller can cancel their listing at any time before it's sold,
+    -- effectively removing it from the marketplace.
+    choice Cancel : ()
+      controller seller
+      do
+        pure ()
+
+    -- | A buyer can purchase the NFT for the listed price.
+    choice Buy
+      : ContractId Token
+        -- ^ Returns the contract ID of the newly transferred NFT.
+      with
+        buyer : Party
+          -- ^ The party purchasing the NFT.
+      controller buyer
+      do
+        -- In a production system, this choice would be coupled with a payment flow.
+        -- For example, the buyer would first create and transfer an IOU contract for the
+        -- `price` to the `seller`. Here we assume successful off-ledger payment and
+        -- proceed directly with the NFT transfer.
+        assertMsg "Buyer cannot be the same as the seller." (buyer /= seller)
+
+        -- Exercise the Transfer choice on the NFT. This delegates the core transfer
+        -- logic, including ownership change and royalty payment distribution, to the
+        -- NFT contract itself, ensuring encapsulation and correctness.
+        exercise nftCid Transfer with newOwner = buyer
+
+-- | An offer made by a potential buyer directly to an NFT owner. This contract
+-- facilitates Over-The-Counter (OTC) or negotiated trades.
+template Offer
+  with
+    buyer : Party
+      -- ^ The party making the offer.
+    seller : Party
+      -- ^ The current owner of the NFT.
+    nftCid : ContractId Token
+      -- ^ The contract ID of the NFT being bid on.
+    nftData : TokenData
+      -- ^ A snapshot of the NFT's data.
+    offerPrice : Decimal
+      -- ^ The price being offered.
+    currency : Text
+      -- ^ The currency of the offer.
+  where
+    signatory buyer
+    observer seller
+
+    key (buyer, seller, nftData.issuer, nftData.id) : (Party, Party, Party, Text)
+    maintainer key._1
+
+    -- | The buyer can withdraw their offer at any time before it's accepted or rejected.
+    choice Withdraw : ()
+      controller buyer
+      do
+        pure ()
+
+    -- | The seller can reject the offer, which archives the contract.
+    choice Reject : ()
+      controller seller
+      do
+        pure ()
+
+    -- | The seller can accept the offer, which transfers the NFT to the buyer.
+    choice Accept
+      : ContractId Token
+        -- ^ Returns the contract ID of the newly transferred NFT.
+      controller seller
+      do
+        -- As with the `Buy` choice, a real system would integrate a payment flow.
+        -- We assume the buyer has made the payment available and we can proceed.
+        nft <- fetch nftCid
+        assertMsg "The seller accepting the offer must be the current owner of the NFT." (nft.owner == seller)
+
+        -- Exercise the Transfer choice, handling ownership change and royalties.
+        exercise nftCid Transfer with newOwner = buyer
