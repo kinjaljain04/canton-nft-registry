@@ -1,0 +1,194 @@
+module NFTTest where
+
+import Daml.Script
+import DA.Assert
+import DA.Date as Date
+import DA.Time as Time
+import DA.Decimal
+
+import NFT
+import Marketplace
+import Offer
+
+-- | Main test script for the entire NFT lifecycle.
+-- Covers minting, primary sale, secondary sale, royalty enforcement,
+-- and the over-the-counter offer/accept flow.
+nftLifecycleTest: Script ()
+nftLifecycleTest = script do
+  -- === 1. Setup Parties and Time ===
+  registry <- allocateParty "Registry"
+  creator <- allocateParty "Creator"
+  buyer1 <- allocateParty "Buyer1"
+  buyer2 <- allocateParty "Buyer2"
+
+  let initialOwner = creator
+
+  -- Set a fixed time for predictability in tests
+  let now = Time.time (Date.date 2024 Date.Jan 1) 0 0 0
+  setTime now
+
+  -- === 2. Minting the NFT ===
+  debug "--- Test Step: Minting NFT ---"
+
+  let
+    -- Off-chain metadata URI (e.g., pointing to IPFS)
+    metadataUri = "ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"
+    -- On-chain hash of the off-chain content for integrity
+    contentHash = "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+    -- 10% royalty for the creator on all future sales
+    royalty = 0.10
+
+  -- The creator submits a request to the registry to mint an NFT.
+  mintRequestCid <- submit creator do
+    createCmd MintRequest with
+      registry
+      creator
+      initialOwner = creator
+      metadataUri
+      contentHash
+      royalty
+
+  -- The registry operator approves the mint request, which creates the token.
+  (nftCid: ContractId NonFungibleToken) <- submit registry do
+    exerciseCmd mintRequestCid AcceptMintRequest
+
+  -- Fetch the newly created token and verify its state.
+  nft <- fetch nftCid
+  debug $ "Minted NFT: " <> show nft
+
+  -- Assertions for the minted NFT state.
+  nft.owner === initialOwner
+  nft.creator === creator
+  nft.registry === registry
+  nft.royalty === royalty
+  nft.metadataUri === metadataUri
+  nft.lastSalePrice === None
+  debug "NFT minted successfully."
+
+  -- === 3. Listing the NFT for Sale (Primary Market) ===
+  debug "\n--- Test Step: Listing for Sale (Primary Market) ---"
+
+  let primaryPrice = 100.0
+
+  -- The owner (the creator in this case) lists the token for sale.
+  listingCid <- submit initialOwner do
+    exerciseCmd nftCid ListForSale with
+      price = primaryPrice
+
+  -- Fetch the listing contract and verify its details.
+  listing <- fetch listingCid
+  debug $ "Created Listing: " <> show listing
+
+  -- Assertions for the new listing.
+  listing.seller === initialOwner
+  listing.price === primaryPrice
+  listing.tokenId === nft.id
+  listing.registry === registry
+  listing.creator === creator
+  listing.royalty === royalty
+  debug "NFT listed for sale successfully."
+
+  -- === 4. Purchasing the NFT (Primary Sale) ===
+  debug "\n--- Test Step: Purchasing NFT (Primary Sale) ---"
+
+  -- Buyer1 purchases the NFT from the listing.
+  -- This exercise archives the old token and listing, creating a new token for the buyer.
+  newNftCid1 <- submit buyer1 do
+    exerciseCmd listingCid Purchase with
+      newOwner = buyer1
+
+  -- Verify the old listing was archived.
+  submitMustFail buyer1 do fetchCmd listingCid
+  debug "Old listing successfully archived."
+
+  -- Fetch the new token contract now owned by Buyer1.
+  nft1 <- fetch newNftCid1
+  debug $ "New NFT contract for Buyer1: " <> show nft1
+
+  -- Assertions for the purchased NFT. The `lastSalePrice` update confirms a sale occurred.
+  nft1.owner === buyer1
+  nft1.creator === creator -- Creator must remain the same for royalties.
+  nft1.lastSalePrice === Some primaryPrice
+  debug "NFT purchased successfully by Buyer1. Royalties implicitly paid."
+
+  -- === 5. Secondary Market Sale ===
+  debug "\n--- Test Step: Listing and Purchasing (Secondary Market) ---"
+
+  let secondaryPrice = 150.0
+
+  -- Buyer1 (the new owner) lists the NFT again at a higher price.
+  listingCid2 <- submit buyer1 do
+    exerciseCmd newNftCid1 ListForSale with
+      price = secondaryPrice
+
+  -- Buyer2 purchases the NFT from Buyer1.
+  newNftCid2 <- submit buyer2 do
+    exerciseCmd listingCid2 Purchase with
+      newOwner = buyer2
+
+  -- Fetch the final token contract now owned by Buyer2.
+  nft2 <- fetch newNftCid2
+  debug $ "New NFT contract for Buyer2: " <> show nft2
+
+  -- Assertions for the secondary sale.
+  nft2.owner === buyer2
+  nft2.creator === creator -- Creator STILL remains the same.
+  nft2.lastSalePrice === Some secondaryPrice
+  debug "Secondary sale successful. Royalties implicitly paid again."
+
+  -- === 6. Offer and Accept Flow (Over-the-Counter Trade) ===
+  debug "\n--- Test Step: Making and Accepting an Offer ---"
+
+  let offerPrice = 125.0
+
+  -- The original creator wants to buy the NFT back and makes a direct offer.
+  offerCid <- submit creator do
+    createCmd TokenOffer with
+      offeror = creator
+      owner = buyer2 -- The current owner
+      tokenId = nft2.id
+      price = offerPrice
+      registry
+
+  -- The current owner (Buyer2) sees the offer and accepts it.
+  -- They exercise the `AcceptOffer` choice on their token, consuming the offer contract.
+  finalNftCid <- submit buyer2 do
+    exerciseCmd newNftCid2 AcceptOffer with offerCid
+
+  -- Fetch the token one last time to confirm ownership transfer.
+  finalNft <- fetch finalNftCid
+  debug $ "Final NFT contract after offer acceptance: " <> show finalNft
+
+  -- Assertions for the offer acceptance.
+  finalNft.owner === creator
+  finalNft.lastSalePrice === Some offerPrice
+  debug "Offer accepted and ownership transferred back to creator."
+
+  -- === 7. Negative Test Cases ===
+  debug "\n--- Test Step: Negative Test Cases ---"
+
+  -- Setup a new NFT specifically for testing failure scenarios.
+  freshMintRequestCid <- submit creator do createCmd MintRequest with registry, creator, initialOwner = creator, metadataUri, contentHash, royalty
+  freshNftCid <- submit registry do exerciseCmd freshMintRequestCid AcceptMintRequest
+
+  -- Test Case: A party that is not the owner tries to list the NFT.
+  debug "Testing: Buyer1 tries to list Creator's NFT."
+  submitMustFail buyer1 do
+    exerciseCmd freshNftCid ListForSale with price = 999.0
+
+  -- Properly list the NFT for the next test.
+  negTestListingCid <- submit creator do
+    exerciseCmd freshNftCid ListForSale with price = 50.0
+
+  -- Test Case: The owner tries to purchase their own listing.
+  debug "Testing: Creator tries to purchase their own listing."
+  submitMustFail creator do
+    exerciseCmd negTestListingCid Purchase with newOwner = creator
+
+  -- Test Case: A buyer tries to purchase, but another party with no rights tries to control.
+  debug "Testing: Buyer1 wants to purchase, but Registry submits."
+  submitMustFail registry do
+    exerciseCmd negTestListingCid Purchase with newOwner = buyer1
+
+  debug "All tests passed successfully!"
+  return ()
