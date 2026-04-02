@@ -1,0 +1,153 @@
+-- Copyright (c) 2024 Digital Asset (Switzerland) GmbH and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+module Offer where
+
+import Daml.Script
+import DA.Text (show)
+import NFT (Nft)
+
+-- | A simple IOU to represent the payment leg of a trade.
+-- In a real-world scenario, this would be replaced by a proper cash or settlement model.
+template PaymentObligation
+  with
+    payer: Party
+    payee: Party
+    amount: Decimal
+    description: Text
+  where
+    signatory payer
+    observer payee
+
+    choice Settle : ()
+      -- In a real system, this choice would be exercised upon off-ledger settlement.
+      -- It might be controlled by both parties or an external settlement agent.
+      controller payer
+      do
+        archive self
+
+-- | Represents an offer from a potential buyer to an NFT owner.
+-- The offeror is committing to pay the `price` in exchange for the NFT.
+template NftOffer
+  with
+    offeror: Party      -- The party making the offer (potential buyer)
+    owner: Party        -- The current owner of the NFT
+    nftCid: ContractId Nft -- The contract ID of the NFT being bid on
+    price: Decimal      -- The offered price for the NFT
+  where
+    signatory offeror
+    observer owner
+
+    ensure price > 0.0
+
+    -- | The offeror can withdraw their offer at any time before it is accepted.
+    choice Cancel : ()
+      controller offeror
+      do
+        archive self
+
+    -- | The NFT owner can accept the offer, which triggers the atomic swap.
+    -- This choice creates payment obligations for the offeror and transfers the NFT.
+    choice Accept : ContractId Nft
+      controller owner
+      do
+        -- Fetch the NFT to ensure it's still valid and owned by the controller.
+        nft <- fetch nftCid
+        assertMsg "The NFT is no longer owned by you. The owner may have changed." (nft.owner == owner)
+
+        -- Calculate payments for royalty and to the owner.
+        let
+          royaltyAmount = price * nft.royaltyRate
+          ownerPayment = price - royaltyAmount
+
+        -- Create the payment obligation for the owner's proceeds.
+        create PaymentObligation with
+          payer = offeror
+          payee = owner
+          amount = ownerPayment
+          description = "Payment for NFT " <> nft.tokenId
+
+        -- Create the royalty payment obligation if applicable.
+        when (royaltyAmount > 0.0 && nft.creator /= owner) do
+          create PaymentObligation with
+            payer = offeror
+            payee = nft.creator
+            amount = royaltyAmount
+            description = "Royalty for NFT " <> nft.tokenId
+
+        -- Execute the transfer of the NFT to the offeror.
+        -- This transaction is authorized by the `owner` (as controller) and the
+        -- `offeror` (as signatory on this NftOffer contract), enabling the
+        -- atomic creation of payment obligations and the NFT transfer.
+        exercise nftCid Transfer with
+          newOwner = offeror
+          salePrice = Some price
+
+-- | Script for demonstrating the NFT offer workflow.
+test_OfferLifecycle : Script ()
+test_OfferLifecycle = script do
+  -- 1. Define parties
+  alice <- allocateParty "Alice" -- Creator & Initial Owner
+  bob <- allocateParty "Bob"   -- Potential Buyer
+  charlie <- allocateParty "Charlie" -- Another party, not involved in offer
+
+  -- 2. Mint an NFT with Alice as creator and owner
+  nftCid <- submit alice do
+    createCmd Nft with
+      issuer = alice
+      owner = alice
+      creator = alice
+      tokenId = "CryptoAsset-001"
+      contentHash = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+      metadataUrl = "https://ipfs.io/ipfs/..."
+      royaltyRate = 0.05 -- 5% royalty
+
+  -- 3. Bob makes an offer for Alice's NFT
+  offerCid <- submit bob do
+    createCmd NftOffer with
+      offeror = bob
+      owner = alice
+      nftCid = nftCid
+      price = 100.0
+
+  -- 4. Alice sees the offer and accepts it
+  -- This archives the offer, transfers the NFT, and creates payment obligations.
+  newNftCid <- submit alice do
+    exerciseCmd offerCid Accept
+
+  -- 5. Verification
+  -- Check that Bob is the new owner.
+  newNft <- fetch newNftCid
+  assertMsg "Bob should be the new owner" (newNft.owner == bob)
+
+  -- Check for payment obligations.
+  -- Query for contracts where Bob is the payer.
+  bobObligations <- queryContracts (Party bob)
+  let
+    ownerPaymentFilter (c: Contract 'PaymentObligation') =
+      c.arg.payee == alice && c.arg.amount == 95.0
+    royaltyPaymentFilter (c: Contract 'PaymentObligation') =
+      -- In this case creator == owner, so no separate royalty payment is created.
+      c.arg.payee == alice && c.arg.amount == 5.0
+
+  assertMsg "Bob should have an obligation to pay Alice 95.0" (length (filter ownerPaymentFilter bobObligations) == 1)
+  -- The creator is also the owner, so our logic avoids a duplicate payment.
+  assertMsg "Bob should not have a separate royalty obligation" (length (filter royaltyPaymentFilter bobObligations) == 0)
+
+  -- (Optional) Demonstrate offer cancellation
+  -- Bob makes another offer, this time on the newly owned NFT (now owned by Bob himself).
+  -- Let's say Charlie makes an offer to Bob.
+  offer2Cid <- submit charlie do
+    createCmd NftOffer with
+      offeror = charlie
+      owner = bob
+      nftCid = newNftCid
+      price = 150.0
+
+  -- Charlie cancels it before Bob can accept
+  submit charlie do
+    exerciseCmd offer2Cid Cancel
+
+  -- Verify offer is gone by trying to fetch it. Should fail.
+  let isCancelled = submitMustFail charlie do fetchCmd offer2Cid
+  pure ()
