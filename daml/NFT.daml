@@ -1,70 +1,285 @@
 module NFT where
 
-import DA.Next.Set (Set)
-import qualified DA.Next.Set as Set
+import DA.Set (Set)
+import qualified DA.Set as Set
+import DA.Time (Time)
+import Daml.Script
 
--- | Configuration for royalty payments on secondary sales.
--- This data is embedded in the NFT to ensure royalty information travels with the token.
-data RoyaltyConfig = RoyaltyConfig
-  with
-    recipient : Party  -- ^ The party who receives royalty payments.
-    rate : Decimal     -- ^ The royalty rate, e.g., 0.05 for 5%. Should be between 0.0 and 1.0.
+-- | A record to track a single transfer event.
+data TransferRecord = TransferRecord with
+  from: Party
+  to: Party
+  transferTime: Time
+  price: Optional Decimal
   deriving (Eq, Show)
 
--- | Anchors the on-chain token to its off-chain metadata (e.g., image, attributes).
--- This keeps the ledger light by storing bulk data off-chain, typically on IPFS.
-data Metadata = Metadata
+-- | The core Non-Fungible Token template.
+-- Each transfer archives the old contract and creates a new one,
+-- building up the transferHistory.
+template NFT
   with
-    contentHash : Text -- ^ A unique hash of the off-chain content (e.g., an IPFS CID).
-    uri : Optional Text -- ^ An optional direct URI to the metadata JSON file.
-  deriving (Eq, Show)
-
--- | The core Non-Fungible Token template. It represents ownership of a unique digital asset
--- and contains all necessary information for transfers and royalty calculations.
-template NonFungibleToken
-  with
-    issuer : Party         -- ^ The original creator of the NFT. This party is immutable.
-    owner : Party          -- ^ The current owner of the NFT. This party can transfer the token.
-    tokenId : Text         -- ^ A unique identifier for this token within the issuer's collection.
-    metadata : Metadata    -- ^ A link to the off-chain metadata.
-    royalty : RoyaltyConfig -- ^ Royalty configuration for secondary sales.
-    observers : Set Party  -- ^ Additional parties who can view the token contract.
+    issuer: Party          -- ^ The original creator/minter of the NFT.
+    owner: Party           -- ^ The current owner of the NFT.
+    royaltyRate: Decimal   -- ^ The royalty percentage (e.g., 0.05 for 5%).
+    royaltyRecipient: Party -- ^ The party who receives royalty payments.
+    tokenId: Text          -- ^ A unique identifier for this token.
+    contentHash: Text      -- ^ A hash of the off-chain metadata (e.g., IPFS CID).
+    operators: Set Party   -- ^ Parties authorized by the owner to initiate transfers.
+    transferHistory: [TransferRecord] -- ^ A log of all previous transfers.
   where
-    signatory owner
+    signatory issuer, owner
+    observer (Set.toList operators), royaltyRecipient
 
-    observer issuer, royalty.recipient, Set.toList observers
-
-    ensure
-      -- The royalty rate must be a valid percentage between 0% and 100%.
-      royalty.rate >= 0.0 && royalty.rate <= 1.0
+    ensure royaltyRate >= 0.0 && royaltyRate < 1.0
 
     key (issuer, tokenId) : (Party, Text)
     maintainer key._1
 
-    -- | A primitive choice to transfer ownership of the NFT to a new party.
-    -- This choice itself does not handle any payment or royalty enforcement. It is designed
-    -- to be called by higher-level contracts (like a Marketplace) that orchestrate a
-    -- delivery-vs-payment (DvP) transaction, including royalty distribution.
-    choice Transfer : ContractId NonFungibleToken
+    -- | Allows the owner to grant another party (e.g., a marketplace) the right
+    -- to transfer this NFT on their behalf.
+    choice GrantOperator : ContractId NFT
       with
-        newOwner : Party
+        operator: Party
       controller owner
       do
-        assertMsg "New owner must be different from the current owner." (newOwner /= owner)
-        create this with owner = newOwner
+        create this with operators = Set.insert operator operators
 
-    -- | Allows the current owner to grant visibility of this token to another party.
-    choice AddObserver : ContractId NonFungibleToken
+    -- | Allows the owner to revoke an operator's right to transfer this NFT.
+    choice RevokeOperator : ContractId NFT
       with
-        observerToAdd : Party
+        operator: Party
       controller owner
       do
-        create this with observers = Set.insert observerToAdd this.observers
+        create this with operators = Set.delete operator operators
 
-    -- | Allows the current owner to revoke visibility of this token from another party.
-    choice RemoveObserver : ContractId NonFungibleToken
+    -- | A simple, non-monetary transfer of the NFT to a new owner.
+    -- This is controlled by the current owner.
+    choice Transfer : ContractId NFT
       with
-        observerToRemove : Party
+        newOwner: Party
+        transferTime: Time
       controller owner
       do
-        create this with observers = Set.delete observerToRemove this.observers
+        ensure newOwner /= owner
+        let newRecord = TransferRecord with
+              from = owner
+              to = newOwner
+              transferTime = transferTime
+              price = None
+        create this with
+          owner = newOwner
+          operators = Set.empty -- Reset operators on transfer
+          transferHistory = transferHistory ++ [newRecord]
+
+    -- | A transfer that includes a sale price and enforces royalty payment.
+    -- This can be initiated by the owner or an authorized operator.
+    choice Sell : ContractId NFT
+      with
+        buyer: Party
+        price: Decimal
+        transferTime: Time
+      controller (Set.toList (Set.insert owner operators))
+      do
+        ensure buyer /= owner
+        ensure price > 0.0
+
+        -- Royalty calculation
+        let royaltyAmount = price * royaltyRate
+        -- In a real system, you'd create a payment obligation contract here.
+        -- For this example, we assume payment is handled off-choice or is trusted.
+        debug $ "Royalty of " <> show royaltyAmount <> " due to " <> show royaltyRecipient
+
+        let newRecord = TransferRecord with
+              from = owner
+              to = buyer
+              transferTime = transferTime
+              price = Some price
+
+        create this with
+          owner = buyer
+          operators = Set.empty -- Reset operators on transfer
+          transferHistory = transferHistory ++ [newRecord]
+
+
+-- | Represents a fixed-price listing on a marketplace.
+template FixedPriceListing
+  with
+    marketplace: Party        -- ^ The marketplace operator.
+    seller: Party             -- ^ The party selling the NFT.
+    nftCid: ContractId NFT    -- ^ The contract ID of the NFT being sold.
+    price: Decimal            -- ^ The asking price.
+    nftData: NFT              -- ^ The fetched data of the NFT for inspection.
+  where
+    signatory marketplace, seller
+    observer nftData.royaltyRecipient
+
+    ensure price > 0.0
+    ensure nftData.owner == seller
+    ensure Set.member marketplace nftData.operators
+
+    choice Buy : ContractId NFT
+      with
+        buyer: Party
+        buyTime: Time
+      controller buyer
+      do
+        -- Ensure the buyer is not the seller.
+        ensure buyer /= seller
+
+        -- The core logic: the marketplace exercises the Sell choice on the NFT
+        -- using its operator permissions.
+        exercise nftCid Sell with buyer, price, transferTime = buyTime
+
+-- | A role contract representing the authority to mint NFTs for a given issuer.
+-- This can be used to delegate minting rights.
+template Registry
+  with
+    issuer: Party
+    marketplace: Party -- A central marketplace operator for convenience
+  where
+    signatory issuer
+
+    -- | The choice to mint a new NFT.
+    choice Mint : ContractId NFT
+      with
+        owner: Party
+        royaltyRate: Decimal
+        tokenId: Text
+        contentHash: Text
+      controller issuer
+      do
+        create NFT with
+          issuer
+          owner
+          royaltyRate
+          royaltyRecipient = issuer -- Issuer is the default royalty recipient
+          tokenId
+          contentHash
+          operators = Set.singleton marketplace
+          transferHistory = []
+
+-- | An Offer contract for making a bid on an NFT that is not listed for sale.
+template Offer
+  with
+    nftCid: ContractId NFT
+    nftIssuer: Party
+    nftTokenId: Text
+    bidder: Party
+    owner: Party
+    offerPrice: Decimal
+  where
+    signatory bidder, owner
+
+    key (nftIssuer, nftTokenId, bidder) : (Party, Text, Party)
+    maintainer key._1
+
+    choice Accept : ContractId NFT
+      with
+        acceptTime: Time
+      controller owner
+      do
+        nft <- fetch nftCid
+        -- The owner doesn't need to be an operator to accept an offer.
+        -- They directly exercise the Sell choice on their own NFT.
+        exercise nftCid Sell with
+          buyer = bidder
+          price = offerPrice
+          transferTime = acceptTime
+
+    choice Withdraw : ()
+      controller bidder
+      do
+        pure ()
+
+-- ====================================================================
+-- Example script for testing the lifecycle.
+-- ====================================================================
+setup : Script ()
+setup = script do
+  -- Parties
+  issuer <- allocateParty "Issuer"
+  alice <- allocateParty "Alice"
+  bob <- allocateParty "Bob"
+  marketplace <- allocateParty "Marketplace"
+
+  -- Initial Time
+  startTime <- getTime
+
+  -- 1. Issuer sets up the Registry
+  registryCid <- submit issuer do
+    create Registry with issuer, marketplace
+
+  -- 2. Issuer mints an NFT and gives it to Alice
+  nftCid <- submit issuer do
+    exercise registryCid Mint with
+      owner = alice
+      royaltyRate = 0.05
+      tokenId = "MONA-LISA-001"
+      contentHash = "Qmaisz6NMhDB51cCvNWa1GMS7LU1pAxdF4Ld6Ft9kZEP2a"
+
+  nft <- fetch nftCid
+  assertMsg "Alice should be the owner" (nft.owner == alice)
+  assertMsg "Marketplace should be an operator" (Set.member marketplace nft.operators)
+
+  -- 3. Alice lists the NFT for a fixed price on the marketplace
+  listingCid <- submit marketplace do
+    create FixedPriceListing with
+      marketplace
+      seller = alice
+      nftCid
+      price = 100.0
+      nftData = nft
+
+  -- 4. Bob buys the NFT
+  newNftCid <- submit bob do
+    exercise listingCid Buy with
+      buyer = bob
+      buyTime = startTime
+
+  -- 5. Verify the transfer and history
+  oldNftActive <- queryContractId alice nftCid
+  assertMsg "Old NFT should be archived" (oldNftActive == None)
+
+  newNft <- fetch newNftCid
+  assertMsg "Bob should be the new owner" (newNft.owner == bob)
+  assertMsg "Transfer history should have one entry" (length newNft.transferHistory == 1)
+
+  let hist = head newNft.transferHistory
+  assertMsg "History 'from' should be Alice" (hist.from == alice)
+  assertMsg "History 'to' should be Bob" (hist.to == bob)
+  assertMsg "History should record the price" (hist.price == Some 100.0)
+  assertMsg "Operators should be reset" (newNft.operators == Set.empty)
+
+  -- 6. Bob makes a simple, non-sale transfer to Alice
+  finalNftCid <- submit bob do
+    exercise newNftCid Transfer with
+      newOwner = alice
+      transferTime = startTime
+
+  finalNft <- fetch finalNftCid
+  assertMsg "Alice should be the owner again" (finalNft.owner == alice)
+  assertMsg "Transfer history should have two entries" (length finalNft.transferHistory == 2)
+
+  let hist2 = head (tail finalNft.transferHistory)
+  assertMsg "Second history 'from' should be Bob" (hist2.from == bob)
+  assertMsg "Second history 'to' should be Alice" (hist2.to == alice)
+  assertMsg "Second transfer should have no price" (hist2.price == None)
+
+  -- 7. Alice receives an offer from Bob
+  offerCid <- submitMulti [alice, bob] do
+    create Offer with
+      nftCid = finalNftCid
+      nftIssuer = issuer
+      nftTokenId = "MONA-LISA-001"
+      bidder = bob
+      owner = alice
+      offerPrice = 150.0
+
+  -- 8. Alice accepts the offer
+  acceptedNftCid <- submit alice do
+    exercise offerCid Accept with acceptTime = startTime
+
+  acceptedNft <- fetch acceptedNftCid
+  assertMsg "Bob should be the final owner" (acceptedNft.owner == bob)
+  assertMsg "Transfer history should have three entries" (length acceptedNft.transferHistory == 3)
+  debug "NFT lifecycle script completed successfully."
