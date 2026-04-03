@@ -1,0 +1,32 @@
+name: Daml CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-and-test:
+    name: Build and Test Daml Contracts
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Daml SDK v3.1.0
+        run: |
+          curl -sSL https://get.daml.com/ | sh -s 3.1.0
+          
+      - name: Add Daml to PATH
+        run: echo "$HOME/.daml/bin" >> $GITHUB_PATH
+
+      - name: Verify Daml installation
+        run: daml --version
+        
+      - name: Build Daml project
+        run: daml build
+        
+      - name: Run Daml tests
+        run: daml test
