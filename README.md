@@ -1,97 +1,149 @@
 # Canton NFT Registry
 
-This project provides a comprehensive NFT lifecycle implementation on the Canton Network using Daml smart contracts. It covers key NFT functionalities, including minting, royalty enforcement, transfer mechanisms, fixed-price listings, and over-the-counter (OTC) trading.
+[![CI](https://github.com/your-org/canton-nft-registry/actions/workflows/ci.yml/badge.svg)](https://github.com/your-org/canton-nft-registry/actions/workflows/ci.yml)
 
-## Features
+A decentralized application for minting, trading, and managing Non-Fungible Tokens (NFTs) on the Canton Network, built with Daml smart contracts. This project provides a complete, production-quality implementation of the NFT lifecycle, emphasizing creator royalties, secure transfers, and flexible trading mechanisms.
 
-*   **NFT Minting:** Allows authorized parties to create new NFTs with associated metadata hash.
-*   **Royalty Enforcement:** Automatically enforces royalty payments on every transfer.
-*   **Transfer Mechanism:** Secure NFT transfer between parties with royalty distribution.
-*   **Fixed-Price Listings:** Enables users to list NFTs for sale at a fixed price.
-*   **OTC Trading (Offer/Accept):** Facilitates direct, peer-to-peer NFT trading via an offer/accept flow.
-*   **Off-Chain Metadata with On-Chain Content Hash:** NFT metadata is stored off-chain, while the content hash is securely anchored on-chain for verification.
+## ✨ Live Demo & Deployment Information
 
-## Architecture
+*   **Live Demo:** [**https://canton-nft-demo.example.com**](https://canton-nft-demo.example.com) *(Note: This is a fictional link for demonstration purposes.)*
+*   **Key Party Identifiers (on the demo Canton domain):**
+    *   **Registry Operator:** `RegistryOperator::00...01`
+    *   **Example Artist:** `Alice::00...a1`
+    *   **Example Collector 1:** `Bob::00...b1`
+    *   **Example Collector 2:** `Charlie::00...c1`
 
-The project is built with Daml smart contracts to ensure secure and transparent NFT operations.  Key components include:
+---
 
-*   **NFT Contract:** Represents the NFT and its core attributes, including owner, royalty information, and metadata hash.
-*   **Royalty Contract:** Manages royalty distribution on transfers.
-*   **Listing Contract:** Handles fixed-price listings and sale execution.
-*   **Offer Contract:** Facilitates OTC trading through an offer/accept workflow.
+## 🚀 Key Features
 
-## Getting Started
+*   **On-Chain Minting & Ownership:** Securely create and track unique digital assets with guaranteed atomicity.
+*   **Enforced Royalties:** Creators automatically receive a percentage of every secondary sale, a rule immutably enforced by the smart contract logic.
+*   **Decentralized Marketplace:**
+    *   **Fixed-Price Listings:** List NFTs for sale at a specific price, allowing for instant purchase.
+    *   **Offer/Accept Flow:** Engage in Over-The-Counter (OTC) trades with a secure proposal system, allowing for price negotiation.
+*   **Off-Chain Metadata:** The on-chain contract anchors to off-chain metadata (e.g., an image on IPFS) via a content hash, keeping the ledger lightweight and efficient.
+*   **Role-Based Permissions:** Clear separation of roles for Creators, Collectors, and a central Registry Operator.
+*   **Privacy by Default:** Canton's privacy model ensures that NFT transfers and trades are only visible to the involved parties, protecting commercial and personal data.
+
+## 🛠️ Technology Stack
+
+*   **Smart Contracts:** [Daml](https://daml.com)
+*   **Ledger Network:** [Canton](https://www.canton.io)
+*   **Frontend:** React, TypeScript, Vite
+*   **API Layer:** Daml JSON API
+
+## 📂 Project Structure
+
+```
+.
+├── .github/workflows/ci.yml  # GitHub Actions CI pipeline
+├── daml/                     # Daml smart contract models
+│   ├── Daml.yaml             # Daml project configuration
+│   └── nft/
+│       ├── Nft.daml          # Core NFT template and holding receipt
+│       ├── Marketplace.daml  # Fixed-price sales and offers
+│       └── Roles.daml        # Creator and Operator role contracts
+├── frontend/                 # React/TypeScript web application
+│   ├── src/
+│   └── package.json
+├── canton/                   # Canton Network configuration and bootstrap scripts
+│   ├── canton.conf
+│   └── bootstrap.canton
+├── README.md                 # This file
+└── .gitignore
+```
+
+## ⚙️ Getting Started
 
 ### Prerequisites
 
-*   Daml SDK (version 3.1.0)
-*   Canton Network access
-*   Node.js and npm (for UI or client applications)
+*   [Daml SDK v3.1.0](https://docs.daml.com/getting-started/installation.html)
+*   [Node.js v18+](https://nodejs.org)
+*   [Java 11](https://adoptium.net/) for running Canton
 
-### Installation
+### 1. Build the Daml Model
 
-1.  Clone the repository:
+Compile the Daml code into a DAR (Daml Archive) file.
 
-    ```bash
-    git clone <repository_url>
-    cd canton-nft-registry
-    ```
+```bash
+daml build
+```
 
-2.  Build the Daml project:
+This will create a file at `.daml/dist/canton-nft-registry-0.1.0.dar`.
 
-    ```bash
-    daml build
-    ```
+### 2. Run the Canton Network
 
-### Running the Application
+This command starts a pre-configured Canton network with one domain, one sequencer, one mediator, and three participant nodes (`operator`, `alice`, `bob`).
 
-Instructions for deploying the Daml package to the Canton Network and interacting with the contracts will be provided separately. These instructions would typically involve:
+```bash
+canton -c canton/canton.conf --bootstrap canton/bootstrap.canton
+```
 
-1.  Starting the Canton Network.
-2.  Deploying the DAR file (`.dar`) to the Canton Network.
-3.  Using the Canton JSON API or a Daml ledger client to interact with the contracts.
+Wait until the console shows that all participants are connected to the domain. In a separate terminal, you can allocate parties to the participants as defined in `bootstrap.canton`.
 
-### Example Usage (Conceptual)
+### 3. Deploy the DAR and Start the JSON API
 
-1.  **Mint an NFT:**
-    *   An authorized party mints an NFT, providing the owner, royalty recipient, royalty rate, and a hash of the NFT metadata.
+The JSON API allows the frontend application to communicate with the Canton ledger.
 
-2.  **Transfer an NFT:**
-    *   The owner initiates a transfer to another party.
-    *   The royalty amount is calculated based on the royalty rate.
-    *   The royalty is automatically distributed to the royalty recipient.
-    *   The NFT ownership is updated.
+Run the following command for each participant, adjusting the ports and party names.
 
-3.  **List an NFT for Sale:**
-    *   The owner lists the NFT for sale at a fixed price.
+**For the Operator:**
+```bash
+daml json-api --ledger-host localhost --ledger-port 10011 \
+  --http-port 7575 --allow-insecure-tokens \
+  --application-id "CantonNftRegistry" \
+  .daml/dist/canton-nft-registry-0.1.0.dar
+```
 
-4.  **OTC Trade:**
-    *   One party creates an offer to buy an NFT from another party.
-    *   The other party can accept or reject the offer.
-    *   If accepted, the NFT and the agreed-upon amount are exchanged.
+**For Alice (Artist):**
+```bash
+daml json-api --ledger-host localhost --ledger-port 10021 \
+  --http-port 7576 --allow-insecure-tokens \
+  --application-id "CantonNftRegistry" \
+  .daml/dist/canton-nft-registry-0.1.0.dar
+```
 
-## Project Structure
+**For Bob (Collector):**
+```bash
+daml json-api --ledger-host localhost --ledger-port 10031 \
+  --http-port 7577 --allow-insecure-tokens \
+  --application-id "CantonNftRegistry" \
+  .daml/dist/canton-nft-registry-0.1.0.dar
+```
 
-The project directory structure is organized as follows:
+### 4. Run the Frontend Application
 
-*   `daml/`: Contains the Daml source code for the NFT contracts.
-    *   `NFT.daml`: Core NFT contract definition.
-    *   `Royalty.daml`: Royalty management contracts.
-    *   `Listing.daml`: Fixed-price listing contracts.
-    *   `Offer.daml`: OTC trading contracts.
-*   `daml.yaml`: Daml project configuration file.
-*   `README.md`: Project overview and documentation.
+Navigate to the `frontend` directory, install dependencies, and start the development server.
 
-## Contributing
+```bash
+cd frontend
+npm install
+npm start
+```
 
-Contributions are welcome! Please follow these guidelines:
+The application will be available at `http://localhost:5173`. You can now log in as `RegistryOperator`, `Alice`, or `Bob` to interact with the application.
+
+## 📜 Daml Model Overview
+
+*   **`Nft.daml`**: Defines the core `Nft` template representing the asset's master record, controlled by the operator. It also includes the `NftHolding` template, which represents an individual's ownership of a specific NFT. Transfers are executed by exercising choices on the `NftHolding` contract.
+*   **`Marketplace.daml`**: Contains the logic for trading.
+    *   `FixedPriceSale`: A contract that puts an `NftHolding` up for sale at a non-negotiable price. Anyone can exercise the `Buy` choice to complete the purchase.
+    *   `Offer`: A contract representing a buyer's offer to purchase an `NftHolding`. The owner of the NFT can then `Accept` or `Reject` the offer.
+*   **`Roles.daml`**:
+    *   `OperatorRole`: A singleton contract giving the `RegistryOperator` administrative rights.
+    *   `CreatorRole`: A contract granted to artists, giving them the right to mint new NFTs via the `Nft` template.
+
+## 🤝 Contributing
+
+Contributions are welcome! Please feel free to open an issue or submit a pull request.
 
 1.  Fork the repository.
-2.  Create a new branch for your feature or bug fix.
-3.  Implement your changes.
-4.  Test your changes thoroughly.
-5.  Submit a pull request.
+2.  Create your feature branch (`git checkout -b feature/AmazingFeature`).
+3.  Commit your changes (`git commit -m 'Add some AmazingFeature'`).
+4.  Push to the branch (`git push origin feature/AmazingFeature`).
+5.  Open a Pull Request.
 
-## License
+## 📄 License
 
-This project is licensed under the [MIT License](LICENSE).
+This project is licensed under the MIT License. See the `LICENSE` file for details.
