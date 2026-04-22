@@ -1,4 +1,4 @@
-sdk-version: 3.1.0
+sdk-version: 3.4.0
 name: canton-nft-registry
 version: 0.1.0
 source: daml
@@ -6,3 +6,12 @@ dependencies:
   - daml-prim
   - daml-stdlib
   - daml-script
+data-dependencies:
+  - .daml/dist/token-cip0056-0.1.0.dar
+parties:
+  - MintAuthority
+  - Artist
+  - Collector1
+  - Collector2
+  - Marketplace
+build-options: ["--target=2.1"]
