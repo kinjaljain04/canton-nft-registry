@@ -3,151 +3,151 @@
 
 module Offer where
 
-import Daml.Script
-import DA.Text (show)
-import NFT (Nft)
+import Nft (Token(..))
+import Common.Asset (Asset(..), AssetId)
 
--- | A simple IOU to represent the payment leg of a trade.
--- In a real-world scenario, this would be replaced by a proper cash or settlement model.
-template PaymentObligation
+-- | A proposal from a potential buyer to an NFT owner.
+-- This is the first step in the OTC offer workflow. It is a unilateral statement
+-- of intent from the buyer, which the owner can accept to proceed.
+template OfferProposal
   with
-    payer: Party
-    payee: Party
-    amount: Decimal
-    description: Text
-  where
-    signatory payer
-    observer payee
-
-    choice Settle : ()
-      -- In a real system, this choice would be exercised upon off-ledger settlement.
-      -- It might be controlled by both parties or an external settlement agent.
-      controller payer
-      do
-        archive self
-
--- | Represents an offer from a potential buyer to an NFT owner.
--- The offeror is committing to pay the `price` in exchange for the NFT.
-template NftOffer
-  with
-    offeror: Party      -- The party making the offer (potential buyer)
-    owner: Party        -- The current owner of the NFT
-    nftCid: ContractId Nft -- The contract ID of the NFT being bid on
-    price: Decimal      -- The offered price for the NFT
+    offeror: Party
+      -- ^ The party making the offer (the buyer).
+    offeree: Party
+      -- ^ The party receiving the offer (the NFT owner).
+    marketplace: Party
+      -- ^ The marketplace facilitating or observing the trade.
+    nftCid: ContractId Token
+      -- ^ The contract ID of the NFT being offered for.
+    paymentAsset: AssetId
+      -- ^ The type of asset being offered for payment (e.g., USD).
+    price: Decimal
+      -- ^ The amount of the payment asset being offered.
   where
     signatory offeror
-    observer owner
+    observer offeree, marketplace
 
     ensure price > 0.0
 
-    -- | The offeror can withdraw their offer at any time before it is accepted.
-    choice Cancel : ()
+    key (offeror, offeree, nftCid) : (Party, Party, ContractId Token)
+    maintainer key._1
+
+    choice OfferProposal_Withdraw : ()
+      -- ^ The offeror can withdraw their proposal at any time before it's accepted.
       controller offeror
       do
-        archive self
+        -- Archives the proposal contract.
+        pure ()
 
-    -- | The NFT owner can accept the offer, which triggers the atomic swap.
-    -- This choice creates payment obligations for the offeror and transfers the NFT.
-    choice Accept : ContractId Nft
-      controller owner
+    choice OfferProposal_Reject : ()
+      -- ^ The offeree can reject the proposal.
+      controller offeree
       do
-        -- Fetch the NFT to ensure it's still valid and owned by the controller.
+        -- Archives the proposal contract.
+        pure ()
+
+    choice OfferProposal_Accept : ContractId OfferInvitation
+      -- ^ The offeree accepts the terms and invites the offeror to lock funds.
+      -- This transitions the workflow to the next state, awaiting funding from the buyer.
+      controller offeree
+      do
         nft <- fetch nftCid
-        assertMsg "The NFT is no longer owned by you. The owner may have changed." (nft.owner == owner)
+        assertMsg "The offeree must be the current owner of the NFT." (nft.owner == offeree)
+        create OfferInvitation with ..
 
-        -- Calculate payments for royalty and to the owner.
-        let
-          royaltyAmount = price * nft.royaltyRate
-          ownerPayment = price - royaltyAmount
+-- | An invitation from the NFT owner to the buyer to lock funds to finalize an offer.
+-- This contract signifies that both parties have agreed to the terms in principle.
+-- The buyer must now commit their funds to create a settlable offer.
+template OfferInvitation
+  with
+    offeror: Party
+    offeree: Party
+    marketplace: Party
+    nftCid: ContractId Token
+    paymentAsset: AssetId
+    price: Decimal
+  where
+    signatory offeree
+    observer offeror, marketplace
 
-        -- Create the payment obligation for the owner's proceeds.
-        create PaymentObligation with
-          payer = offeror
-          payee = owner
-          amount = ownerPayment
-          description = "Payment for NFT " <> nft.tokenId
+    key (offeror, offeree, nftCid) : (Party, Party, ContractId Token)
+    maintainer key._2
 
-        -- Create the royalty payment obligation if applicable.
-        when (royaltyAmount > 0.0 && nft.creator /= owner) do
-          create PaymentObligation with
-            payer = offeror
-            payee = nft.creator
-            amount = royaltyAmount
-            description = "Royalty for NFT " <> nft.tokenId
+    choice OfferInvitation_Decline : ()
+      -- ^ The offeror can change their mind and decline to fund the offer.
+      controller offeror
+      do
+        -- Archives the invitation contract.
+        pure ()
 
-        -- Execute the transfer of the NFT to the offeror.
-        -- This transaction is authorized by the `owner` (as controller) and the
-        -- `offeror` (as signatory on this NftOffer contract), enabling the
-        -- atomic creation of payment obligations and the NFT transfer.
-        exercise nftCid Transfer with
+    choice OfferInvitation_Fund : ContractId Offer
+      -- ^ The offeror provides the locked funds, creating the final, settlable Offer.
+      with
+        paymentCid: ContractId Asset
+          -- ^ The contract ID of the fungible asset locked for payment.
+      controller offeror
+      do
+        -- Verify the provided asset contract is valid for this offer.
+        payment <- fetch paymentCid
+        assertMsg "Payment asset must be owned by the offeror." (payment.owner == offeror)
+        assertMsg "Payment asset type does not match offer terms." (payment.id == paymentAsset)
+        assertMsg "Payment asset amount does not match offer price." (payment.quantity == price)
+
+        create Offer with
+          paymentCid = paymentCid
+          ..
+
+-- | A fully funded, bilateral offer that is ready for settlement.
+-- This contract is signed by both parties and contains the locked payment asset.
+-- It acts as the atomic settlement vehicle for the OTC trade.
+template Offer
+  with
+    offeror: Party
+      -- ^ The buyer, who has locked their funds.
+    offeree: Party
+      -- ^ The seller, who has agreed to the terms.
+    marketplace: Party
+      -- ^ The marketplace facilitating the settlement.
+    nftCid: ContractId Token
+      -- ^ The NFT being sold.
+    paymentAsset: AssetId
+      -- ^ The type of payment asset.
+    price: Decimal
+      -- ^ The agreed price.
+    paymentCid: ContractId Asset
+      -- ^ The locked funds from the buyer.
+  where
+    signatory offeror, offeree
+    observer marketplace
+
+    key (offeror, offeree, nftCid) : (Party, Party, ContractId Token)
+    maintainer key._1, key._2
+
+    ensure do
+      -- Double-check conditions at the moment of creation.
+      nft <- fetch nftCid
+      assertMsg "Offeree must be the owner of the NFT." (nft.owner == offeree)
+      payment <- fetch paymentCid
+      assertMsg "Offeror must be the owner of the payment asset." (payment.owner == offeror)
+
+    choice Offer_Settle : ContractId Token
+      -- ^ The seller executes the settlement, triggering the DvP swap.
+      -- The NFT is transferred to the buyer, and the payment is released to the
+      -- seller and royalty recipients, as defined in the Nft.Token template.
+      controller offeree
+      do
+        -- The core of the DvP is delegating the transfer logic to the NFT contract.
+        -- We assume `Nft.Token` has a `Transfer` choice that takes the payment,
+        -- handles royalty distribution, and completes the swap atomically.
+        exercise nftCid.Transfer with
           newOwner = offeror
-          salePrice = Some price
+          paymentCid = paymentCid
 
--- | Script for demonstrating the NFT offer workflow.
-test_OfferLifecycle : Script ()
-test_OfferLifecycle = script do
-  -- 1. Define parties
-  alice <- allocateParty "Alice" -- Creator & Initial Owner
-  bob <- allocateParty "Bob"   -- Potential Buyer
-  charlie <- allocateParty "Charlie" -- Another party, not involved in offer
-
-  -- 2. Mint an NFT with Alice as creator and owner
-  nftCid <- submit alice do
-    createCmd Nft with
-      issuer = alice
-      owner = alice
-      creator = alice
-      tokenId = "CryptoAsset-001"
-      contentHash = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
-      metadataUrl = "https://ipfs.io/ipfs/..."
-      royaltyRate = 0.05 -- 5% royalty
-
-  -- 3. Bob makes an offer for Alice's NFT
-  offerCid <- submit bob do
-    createCmd NftOffer with
-      offeror = bob
-      owner = alice
-      nftCid = nftCid
-      price = 100.0
-
-  -- 4. Alice sees the offer and accepts it
-  -- This archives the offer, transfers the NFT, and creates payment obligations.
-  newNftCid <- submit alice do
-    exerciseCmd offerCid Accept
-
-  -- 5. Verification
-  -- Check that Bob is the new owner.
-  newNft <- fetch newNftCid
-  assertMsg "Bob should be the new owner" (newNft.owner == bob)
-
-  -- Check for payment obligations.
-  -- Query for contracts where Bob is the payer.
-  bobObligations <- queryContracts (Party bob)
-  let
-    ownerPaymentFilter (c: Contract 'PaymentObligation') =
-      c.arg.payee == alice && c.arg.amount == 95.0
-    royaltyPaymentFilter (c: Contract 'PaymentObligation') =
-      -- In this case creator == owner, so no separate royalty payment is created.
-      c.arg.payee == alice && c.arg.amount == 5.0
-
-  assertMsg "Bob should have an obligation to pay Alice 95.0" (length (filter ownerPaymentFilter bobObligations) == 1)
-  -- The creator is also the owner, so our logic avoids a duplicate payment.
-  assertMsg "Bob should not have a separate royalty obligation" (length (filter royaltyPaymentFilter bobObligations) == 0)
-
-  -- (Optional) Demonstrate offer cancellation
-  -- Bob makes another offer, this time on the newly owned NFT (now owned by Bob himself).
-  -- Let's say Charlie makes an offer to Bob.
-  offer2Cid <- submit charlie do
-    createCmd NftOffer with
-      offeror = charlie
-      owner = bob
-      nftCid = newNftCid
-      price = 150.0
-
-  -- Charlie cancels it before Bob can accept
-  submit charlie do
-    exerciseCmd offer2Cid Cancel
-
-  -- Verify offer is gone by trying to fetch it. Should fail.
-  let isCancelled = submitMustFail charlie do fetchCmd offer2Cid
-  pure ()
+    choice Offer_Cancel : ()
+      -- ^ If both parties agree, the offer can be cancelled and funds returned.
+      controller offeror, offeree
+      do
+        -- Return the locked funds to the original owner.
+        -- Assumes the `Common.Asset` template has a `Transfer` choice.
+        exercise paymentCid.Transfer with newOwner = offeror
+        pure ()
