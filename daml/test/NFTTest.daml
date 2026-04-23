@@ -1,194 +1,179 @@
+-- Copyright (c) 2024 Digital Asset (Switzerland) GmbH and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
 module NFTTest where
 
 import Daml.Script
 import DA.Assert
-import DA.Date as Date
-import DA.Time as Time
-import DA.Decimal
+import DA.Optional (isNone)
 
 import NFT
-import Marketplace
-import Offer
 
--- | Main test script for the entire NFT lifecycle.
--- Covers minting, primary sale, secondary sale, royalty enforcement,
--- and the over-the-counter offer/accept flow.
-nftLifecycleTest: Script ()
+-- | A Daml Script test suite for the complete NFT lifecycle.
+-- This test covers:
+-- 1. Setup of minter roles and royalty policies.
+-- 2. Minting a new NFT.
+-- 3. Listing the NFT for a fixed price.
+-- 4. A buyer purchasing the NFT from the listing, triggering payment and royalty distribution.
+-- 5. A different buyer making an offer on the NFT.
+-- 6. The current owner accepting the offer, again triggering payment and royalty distribution.
+-- 7. The final owner performing a direct transfer, which also enforces royalties.
 nftLifecycleTest = script do
-  -- === 1. Setup Parties and Time ===
-  registry <- allocateParty "Registry"
-  creator <- allocateParty "Creator"
-  buyer1 <- allocateParty "Buyer1"
-  buyer2 <- allocateParty "Buyer2"
+  -- === Parties Setup ===
+  minter <- allocatePartyWithHint "Minter" (PartyIdHint "minter")
+  artist <- allocatePartyWithHint "Artist" (PartyIdHint "artist")
+  gallery <- allocatePartyWithHint "Gallery" (PartyIdHint "gallery")
+  alice <- allocatePartyWithHint "Alice" (PartyIdHint "alice")
+  bob <- allocatePartyWithHint "Bob" (PartyIdHint "bob")
+  charlie <- allocatePartyWithHint "Charlie" (PartyIdHint "charlie")
 
-  let initialOwner = creator
+  -- === 1. Roles and Policies Setup ===
+  -- The minter is given a role contract allowing them to mint NFTs.
+  -- The artist creates a royalty policy for their collection.
+  minterRoleCid <- submit minter do
+    createCmd MinterRole with minter, observers = [gallery]
 
-  -- Set a fixed time for predictability in tests
-  let now = Time.time (Date.date 2024 Date.Jan 1) 0 0 0
-  setTime now
+  royaltyPolicyCid <- submit artist do
+    createCmd RoyaltyPolicy with
+      issuer = artist
+      recipient = artist
+      rate = 0.05 -- 5%
+      observers = [gallery, minter]
 
-  -- === 2. Minting the NFT ===
-  debug "--- Test Step: Minting NFT ---"
-
+  -- === 2. Minting ===
+  -- The minter creates a new NFT and assigns it to the initial owner, Alice.
   let
-    -- Off-chain metadata URI (e.g., pointing to IPFS)
-    metadataUri = "ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"
-    -- On-chain hash of the off-chain content for integrity
-    contentHash = "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
-    -- 10% royalty for the creator on all future sales
-    royalty = 0.10
+    contentHash = "a43a655755e1b52a425339c2f63f538ec9103de61474a05584b421c97a5a8e63"
+    metadataUrl = "https://example.com/nft/1.json"
 
-  -- The creator submits a request to the registry to mint an NFT.
-  mintRequestCid <- submit creator do
-    createCmd MintRequest with
-      registry
-      creator
-      initialOwner = creator
-      metadataUri
+  nftCid_alice <- submit minter do
+    exerciseCmd minterRoleCid Mint with
+      owner = alice
+      royaltyPolicyCid
       contentHash
-      royalty
+      metadataUrl
+      observers = [gallery]
 
-  -- The registry operator approves the mint request, which creates the token.
-  (nftCid: ContractId NonFungibleToken) <- submit registry do
-    exerciseCmd mintRequestCid AcceptMintRequest
+  -- Verification: Check that Alice owns the newly minted NFT.
+  (nftCid, nft) <- queryContractId alice nftCid_alice
+  debug $ "1. Minted NFT " <> show nftCid <> " for Alice"
+  assert (nft.owner == alice)
+  assert (nft.minter == minter)
+  assert (nft.royaltyPolicyCid == royaltyPolicyCid)
+  assert (nft.contentHash == contentHash)
 
-  -- Fetch the newly created token and verify its state.
-  nft <- fetch nftCid
-  debug $ "Minted NFT: " <> show nft
+  -- === 3. Fixed Price Sale ===
+  -- Alice lists her NFT for sale at a fixed price.
+  let salePrice1 = 100.0
+  listingCid <- submit alice do
+    createCmd FixedPriceListing with
+      seller = alice
+      nftCid
+      price = salePrice1
+      observers = [gallery, bob]
+  debug $ "2. Alice listed NFT for " <> show salePrice1
 
-  -- Assertions for the minted NFT state.
-  nft.owner === initialOwner
-  nft.creator === creator
-  nft.registry === registry
-  nft.royalty === royalty
-  nft.metadataUri === metadataUri
-  nft.lastSalePrice === None
-  debug "NFT minted successfully."
+  -- Bob purchases the NFT from the listing.
+  (newNftCid_bob, (sellerPaymentCid1, royaltyPaymentCid1)) <- submit bob do
+    exerciseCmd listingCid Purchase with buyer = bob
+  debug "3. Bob purchased NFT from listing"
 
-  -- === 3. Listing the NFT for Sale (Primary Market) ===
-  debug "\n--- Test Step: Listing for Sale (Primary Market) ---"
+  -- Verification:
+  -- a) The listing contract should be archived.
+  listingQuery <- queryContractId bob listingCid
+  assertMsg "FixedPriceListing should be archived after purchase" (isNone listingQuery)
 
-  let primaryPrice = 100.0
+  -- b) A new NFT contract should exist, owned by Bob.
+  (_, nft_bob) <- queryContractId bob newNftCid_bob
+  assert (nft_bob.owner == bob)
+  assert (nft_bob.minter == minter)
 
-  -- The owner (the creator in this case) lists the token for sale.
-  listingCid <- submit initialOwner do
-    exerciseCmd nftCid ListForSale with
-      price = primaryPrice
+  -- c) A payment obligation should be created for the seller (Alice).
+  (_, sellerPayment1) <- queryContractId alice sellerPaymentCid1
+  let expectedSellerAmount1 = salePrice1 * (1.0 - 0.05)
+  assert (sellerPayment1.payer == bob)
+  assert (sellerPayment1.receiver == alice)
+  assert (sellerPayment1.amount == expectedSellerAmount1)
+  debug $ "Seller (Alice) payment obligation created for " <> show sellerPayment1.amount
 
-  -- Fetch the listing contract and verify its details.
-  listing <- fetch listingCid
-  debug $ "Created Listing: " <> show listing
+  -- d) A royalty payment obligation should be created for the artist.
+  (_, royaltyPayment1) <- queryContractId artist royaltyPaymentCid1
+  let expectedRoyaltyAmount1 = salePrice1 * 0.05
+  assert (royaltyPayment1.payer == bob)
+  assert (royaltyPayment1.receiver == artist)
+  assert (royaltyPayment1.amount == expectedRoyaltyAmount1)
+  debug $ "Artist royalty obligation created for " <> show royaltyPayment1.amount
 
-  -- Assertions for the new listing.
-  listing.seller === initialOwner
-  listing.price === primaryPrice
-  listing.tokenId === nft.id
-  listing.registry === registry
-  listing.creator === creator
-  listing.royalty === royalty
-  debug "NFT listed for sale successfully."
-
-  -- === 4. Purchasing the NFT (Primary Sale) ===
-  debug "\n--- Test Step: Purchasing NFT (Primary Sale) ---"
-
-  -- Buyer1 purchases the NFT from the listing.
-  -- This exercise archives the old token and listing, creating a new token for the buyer.
-  newNftCid1 <- submit buyer1 do
-    exerciseCmd listingCid Purchase with
-      newOwner = buyer1
-
-  -- Verify the old listing was archived.
-  submitMustFail buyer1 do fetchCmd listingCid
-  debug "Old listing successfully archived."
-
-  -- Fetch the new token contract now owned by Buyer1.
-  nft1 <- fetch newNftCid1
-  debug $ "New NFT contract for Buyer1: " <> show nft1
-
-  -- Assertions for the purchased NFT. The `lastSalePrice` update confirms a sale occurred.
-  nft1.owner === buyer1
-  nft1.creator === creator -- Creator must remain the same for royalties.
-  nft1.lastSalePrice === Some primaryPrice
-  debug "NFT purchased successfully by Buyer1. Royalties implicitly paid."
-
-  -- === 5. Secondary Market Sale ===
-  debug "\n--- Test Step: Listing and Purchasing (Secondary Market) ---"
-
-  let secondaryPrice = 150.0
-
-  -- Buyer1 (the new owner) lists the NFT again at a higher price.
-  listingCid2 <- submit buyer1 do
-    exerciseCmd newNftCid1 ListForSale with
-      price = secondaryPrice
-
-  -- Buyer2 purchases the NFT from Buyer1.
-  newNftCid2 <- submit buyer2 do
-    exerciseCmd listingCid2 Purchase with
-      newOwner = buyer2
-
-  -- Fetch the final token contract now owned by Buyer2.
-  nft2 <- fetch newNftCid2
-  debug $ "New NFT contract for Buyer2: " <> show nft2
-
-  -- Assertions for the secondary sale.
-  nft2.owner === buyer2
-  nft2.creator === creator -- Creator STILL remains the same.
-  nft2.lastSalePrice === Some secondaryPrice
-  debug "Secondary sale successful. Royalties implicitly paid again."
-
-  -- === 6. Offer and Accept Flow (Over-the-Counter Trade) ===
-  debug "\n--- Test Step: Making and Accepting an Offer ---"
-
-  let offerPrice = 125.0
-
-  -- The original creator wants to buy the NFT back and makes a direct offer.
-  offerCid <- submit creator do
-    createCmd TokenOffer with
-      offeror = creator
-      owner = buyer2 -- The current owner
-      tokenId = nft2.id
+  -- === 4. Offer and Accept Flow ===
+  -- Charlie makes an offer on the NFT now owned by Bob.
+  let offerPrice = 120.0
+  offerCid <- submit charlie do
+    createCmd Offer with
+      buyer = charlie
+      nftCid = newNftCid_bob
       price = offerPrice
-      registry
+      observers = [gallery, bob]
+  debug $ "4. Charlie made an offer of " <> show offerPrice <> " for Bob's NFT"
 
-  -- The current owner (Buyer2) sees the offer and accepts it.
-  -- They exercise the `AcceptOffer` choice on their token, consuming the offer contract.
-  finalNftCid <- submit buyer2 do
-    exerciseCmd newNftCid2 AcceptOffer with offerCid
+  -- Bob accepts Charlie's offer.
+  (newNftCid_charlie, (sellerPaymentCid2, royaltyPaymentCid2)) <- submit bob do
+    exerciseCmd newNftCid_bob AcceptOffer with offerCid
+  debug "5. Bob accepted Charlie's offer"
 
-  -- Fetch the token one last time to confirm ownership transfer.
-  finalNft <- fetch finalNftCid
-  debug $ "Final NFT contract after offer acceptance: " <> show finalNft
+  -- Verification:
+  -- a) The offer contract should be archived.
+  offerQuery <- queryContractId charlie offerCid
+  assertMsg "Offer should be archived after being accepted" (isNone offerQuery)
 
-  -- Assertions for the offer acceptance.
-  finalNft.owner === creator
-  finalNft.lastSalePrice === Some offerPrice
-  debug "Offer accepted and ownership transferred back to creator."
+  -- b) A new NFT contract should exist, owned by Charlie.
+  (_, nft_charlie) <- queryContractId charlie newNftCid_charlie
+  assert (nft_charlie.owner == charlie)
 
-  -- === 7. Negative Test Cases ===
-  debug "\n--- Test Step: Negative Test Cases ---"
+  -- c) A payment obligation should be created for the seller (Bob).
+  (_, sellerPayment2) <- queryContractId bob sellerPaymentCid2
+  let expectedSellerAmount2 = offerPrice * (1.0 - 0.05)
+  assert (sellerPayment2.payer == charlie)
+  assert (sellerPayment2.receiver == bob)
+  assert (sellerPayment2.amount == expectedSellerAmount2)
+  debug $ "Seller (Bob) payment obligation created for " <> show sellerPayment2.amount
 
-  -- Setup a new NFT specifically for testing failure scenarios.
-  freshMintRequestCid <- submit creator do createCmd MintRequest with registry, creator, initialOwner = creator, metadataUri, contentHash, royalty
-  freshNftCid <- submit registry do exerciseCmd freshMintRequestCid AcceptMintRequest
+  -- d) A royalty payment obligation should be created for the artist.
+  (_, royaltyPayment2) <- queryContractId artist royaltyPaymentCid2
+  let expectedRoyaltyAmount2 = offerPrice * 0.05
+  assert (royaltyPayment2.payer == charlie)
+  assert (royaltyPayment2.receiver == artist)
+  assert (royaltyPayment2.amount == expectedRoyaltyAmount2)
+  debug $ "Artist royalty obligation created for " <> show royaltyPayment2.amount
 
-  -- Test Case: A party that is not the owner tries to list the NFT.
-  debug "Testing: Buyer1 tries to list Creator's NFT."
-  submitMustFail buyer1 do
-    exerciseCmd freshNftCid ListForSale with price = 999.0
+  -- === 5. Direct Transfer with Royalty ===
+  -- Charlie transfers the NFT directly to Alice, specifying a sale price for royalty calculation.
+  let salePrice2 = 50.0
+  (finalNftCid_alice, (sellerPaymentCid3, royaltyPaymentCid3)) <- submit charlie do
+    exerciseCmd newNftCid_charlie Transfer with
+      newOwner = alice
+      salePrice = salePrice2
+  debug $ "6. Charlie transferred NFT to Alice for a declared value of " <> show salePrice2
 
-  -- Properly list the NFT for the next test.
-  negTestListingCid <- submit creator do
-    exerciseCmd freshNftCid ListForSale with price = 50.0
+  -- Verification:
+  -- a) A new NFT contract should exist, owned by Alice again.
+  (_, finalNft_alice) <- queryContractId alice finalNftCid_alice
+  assert (finalNft_alice.owner == alice)
 
-  -- Test Case: The owner tries to purchase their own listing.
-  debug "Testing: Creator tries to purchase their own listing."
-  submitMustFail creator do
-    exerciseCmd negTestListingCid Purchase with newOwner = creator
+  -- b) A payment obligation should be created for the seller (Charlie).
+  (_, sellerPayment3) <- queryContractId charlie sellerPaymentCid3
+  let expectedSellerAmount3 = salePrice2 * (1.0 - 0.05)
+  assert (sellerPayment3.payer == alice)
+  assert (sellerPayment3.receiver == charlie)
+  assert (sellerPayment3.amount == expectedSellerAmount3)
+  debug $ "Seller (Charlie) payment obligation created for " <> show sellerPayment3.amount
 
-  -- Test Case: A buyer tries to purchase, but another party with no rights tries to control.
-  debug "Testing: Buyer1 wants to purchase, but Registry submits."
-  submitMustFail registry do
-    exerciseCmd negTestListingCid Purchase with newOwner = buyer1
+  -- c) A royalty payment obligation should be created for the artist.
+  (_, royaltyPayment3) <- queryContractId artist royaltyPaymentCid3
+  let expectedRoyaltyAmount3 = salePrice2 * 0.05
+  assert (royaltyPayment3.payer == alice)
+  assert (royaltyPayment3.receiver == artist)
+  assert (royaltyPayment3.amount == expectedRoyaltyAmount3)
+  debug $ "Artist royalty obligation created for " <> show royaltyPayment3.amount
 
-  debug "All tests passed successfully!"
+  debug "NFT lifecycle test completed successfully."
   return ()
