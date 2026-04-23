@@ -1,142 +1,188 @@
 module Marketplace where
 
-import NFT
+import Registry (Nft(..), NftProperties(..))
+import Common.Iou (Iou(..))
 
--- | A proposal from an NFT owner to a marketplace to list their NFT for sale.
--- This follows the standard proposal-acceptance pattern, ensuring both parties
--- agree to the listing before it becomes active.
-template ListingProposal
-  with
-    seller : Party
-      -- ^ The owner of the NFT who wants to list it.
-    marketplace : Party
-      -- ^ The marketplace party that will host the listing.
-    nftCid : ContractId Token
-      -- ^ The contract ID of the NFT to be listed.
-    price : Decimal
-      -- ^ The asking price for the NFT.
-    currency : Text
-      -- ^ The currency of the price (e.g., "USD", "ETH").
-  where
-    signatory seller
-    observer marketplace
-
-    -- | The seller can cancel the proposal before the marketplace accepts it.
-    choice Cancel : ()
-      controller seller
-      do
-        pure ()
-
-    -- | The marketplace can accept the proposal, which creates an active `Listing` contract.
-    choice Accept : ContractId Listing
-      controller marketplace
-      do
-        -- Fetch the token to ensure the seller still owns it and to get its data.
-        nft <- fetch nftCid
-        assertMsg "Proposer must be the owner of the NFT at the time of listing." (nft.owner == seller)
-
-        create Listing with
-          seller
-          marketplace
-          nftCid
-          nftData = nft.data
-          price
-          currency
-
--- | An active, fixed-price listing for an NFT on a marketplace. This contract
--- represents an NFT that is available for immediate purchase at the specified price.
+-- | A contract representing an NFT listed for sale at a fixed price.
+-- The original Nft contract is consumed when the Listing is created to prevent
+-- the owner from transferring it while it's listed. The Nft's data is
+-- copied into this contract.
 template Listing
   with
     seller : Party
-      -- ^ The owner of the NFT.
+      -- ^ The owner of the NFT who is listing it for sale.
     marketplace : Party
-      -- ^ The marketplace party hosting the listing.
-    nftCid : ContractId Token
-      -- ^ The contract ID of the listed NFT.
-    nftData : TokenData
-      -- ^ A snapshot of the NFT's data for display purposes on a UI.
+      -- ^ The operator of the marketplace platform.
+    nftId : Text
+      -- ^ The unique, unchanging identifier of the NFT asset.
+    nftProperties : NftProperties
+      -- ^ The immutable properties of the NFT, copied from the original contract.
     price : Decimal
-      -- ^ The fixed sale price.
-    currency : Text
-      -- ^ The currency of the price.
+      -- ^ The asking price for the NFT.
+    currencyIssuer : Party
+      -- ^ The issuer of the currency for the payment.
   where
     signatory seller, marketplace
+    observer nftProperties.creator
 
-    key (seller, nftData.issuer, nftData.id) : (Party, Party, Text)
+    key (marketplace, seller, nftId) : (Party, Party, Text)
     maintainer key._1
 
-    -- | The seller can cancel their listing at any time before it's sold,
-    -- effectively removing it from the marketplace.
-    choice Cancel : ()
+    ensure price > 0.0
+
+    -- | The seller can delist their NFT at any time, as long as it hasn't been sold.
+    -- This archives the Listing and recreates the original Nft contract for the seller.
+    choice Delist : ContractId Nft
       controller seller
       do
-        pure ()
+        create Nft with
+          owner = seller
+          registry = nftProperties.registry
+          id = nftId
+          properties = nftProperties
 
     -- | A buyer can purchase the NFT for the listed price.
-    choice Buy
-      : ContractId Token
-        -- ^ Returns the contract ID of the newly transferred NFT.
+    -- This is an atomic Delivery-vs-Payment (DVP) transaction.
+    -- The currency issuer must be a controller to authorize the re-issuance
+    -- of currency from the buyer to the seller and creator.
+    choice Buy : ContractId Nft
       with
         buyer : Party
           -- ^ The party purchasing the NFT.
-      controller buyer
+        paymentCid : ContractId Iou
+          -- ^ A contract for the payment, owned by the buyer.
+      controller buyer, currencyIssuer
       do
-        -- In a production system, this choice would be coupled with a payment flow.
-        -- For example, the buyer would first create and transfer an IOU contract for the
-        -- `price` to the `seller`. Here we assume successful off-ledger payment and
-        -- proceed directly with the NFT transfer.
-        assertMsg "Buyer cannot be the same as the seller." (buyer /= seller)
+        -- 1. Fetch and validate the payment contract.
+        payment <- fetch paymentCid
+        assertMsg "Payment must be from the buyer" $
+          payment.owner == buyer
+        assertMsg "Payment issuer must match the listing" $
+          payment.issuer == currencyIssuer
+        assertMsg "Payment amount must match the listing price" $
+          payment.amount == price
 
-        -- Exercise the Transfer choice on the NFT. This delegates the core transfer
-        -- logic, including ownership change and royalty payment distribution, to the
-        -- NFT contract itself, ensuring encapsulation and correctness.
-        exercise nftCid Transfer with newOwner = buyer
+        -- 2. Archive the buyer's payment IOU.
+        archive paymentCid
 
--- | An offer made by a potential buyer directly to an NFT owner. This contract
--- facilitates Over-The-Counter (OTC) or negotiated trades.
+        -- 3. Calculate royalty and seller proceeds.
+        let
+          royaltyAmount = price * nftProperties.royaltyRate
+          sellerProceeds = price - royaltyAmount
+
+        -- 4. Distribute funds: create new IOUs for the seller and creator.
+        when (sellerProceeds > 0.0) do
+          create Iou with
+            issuer = currencyIssuer
+            owner = seller
+            amount = sellerProceeds
+            currency = payment.currency
+            observers = []
+
+        when (royaltyAmount > 0.0) do
+          create Iou with
+            issuer = currencyIssuer
+            owner = nftProperties.creator
+            amount = royaltyAmount
+            currency = payment.currency
+            observers = []
+
+        -- 5. Deliver the NFT: create a new Nft contract for the buyer.
+        create Nft with
+          owner = buyer
+          registry = nftProperties.registry
+          id = nftId
+          properties = nftProperties
+
+
+-- | A contract representing an offer made by a buyer for a specific NFT.
+-- This is used for negotiation or for NFTs that are not listed for a fixed price.
 template Offer
   with
     buyer : Party
       -- ^ The party making the offer.
     seller : Party
       -- ^ The current owner of the NFT.
-    nftCid : ContractId Token
-      -- ^ The contract ID of the NFT being bid on.
-    nftData : TokenData
-      -- ^ A snapshot of the NFT's data.
+    marketplace : Party
+      -- ^ The operator of the marketplace platform.
+    nftCid : ContractId Nft
+      -- ^ A reference to the active Nft contract being targeted by the offer.
     offerPrice : Decimal
-      -- ^ The price being offered.
+      -- ^ The price being offered for the NFT.
+    currencyIssuer : Party
+      -- ^ The issuer of the currency for the payment.
     currency : Text
-      -- ^ The currency of the offer.
+      -- ^ The symbol of the currency being offered (e.g., "USD").
   where
     signatory buyer
-    observer seller
+    observer seller, marketplace
 
-    key (buyer, seller, nftData.issuer, nftData.id) : (Party, Party, Party, Text)
-    maintainer key._1
+    ensure offerPrice > 0.0
 
-    -- | The buyer can withdraw their offer at any time before it's accepted or rejected.
+    -- | The buyer can withdraw their offer at any time before it's accepted.
     choice Withdraw : ()
       controller buyer
-      do
-        pure ()
+      do pure ()
 
-    -- | The seller can reject the offer, which archives the contract.
+    -- | The seller can reject the offer.
     choice Reject : ()
       controller seller
-      do
-        pure ()
+      do pure ()
 
-    -- | The seller can accept the offer, which transfers the NFT to the buyer.
-    choice Accept
-      : ContractId Token
-        -- ^ Returns the contract ID of the newly transferred NFT.
-      controller seller
+    -- | The seller can accept the offer, triggering an atomic DVP settlement.
+    -- This archives the original Nft and the Offer, and creates a new Nft for
+    -- the buyer, while distributing the payment to the seller and creator.
+    choice Accept : ContractId Nft
+      with
+        paymentCid : ContractId Iou
+          -- ^ A contract for the payment, owned by the buyer, matching the offer price.
+      controller seller, currencyIssuer
       do
-        -- As with the `Buy` choice, a real system would integrate a payment flow.
-        -- We assume the buyer has made the payment available and we can proceed.
+        -- 1. Fetch the NFT to ensure it's still active and owned by the seller.
         nft <- fetch nftCid
-        assertMsg "The seller accepting the offer must be the current owner of the NFT." (nft.owner == seller)
+        assertMsg "Offer seller must be the current NFT owner" $
+          nft.owner == seller
 
-        -- Exercise the Transfer choice, handling ownership change and royalties.
-        exercise nftCid Transfer with newOwner = buyer
+        -- 2. Fetch and validate the provided payment IOU.
+        payment <- fetch paymentCid
+        assertMsg "Payment must be from the buyer" $
+          payment.owner == buyer
+        assertMsg "Payment issuer must match the offer" $
+          payment.issuer == currencyIssuer
+        assertMsg "Payment amount must match the offer price" $
+          payment.amount == offerPrice
+        assertMsg "Payment currency must match the offer currency" $
+          payment.currency == currency
+
+        -- 3. Archive the original Nft contract and the buyer's payment IOU.
+        archive nftCid
+        archive paymentCid
+
+        -- 4. Calculate royalty and seller proceeds.
+        let
+          royaltyAmount = offerPrice * nft.properties.royaltyRate
+          sellerProceeds = offerPrice - royaltyAmount
+
+        -- 5. Distribute funds: create new IOUs for the seller and creator.
+        when (sellerProceeds > 0.0) do
+          create Iou with
+            issuer = currencyIssuer
+            owner = seller
+            amount = sellerProceeds
+            currency = currency
+            observers = []
+
+        when (royaltyAmount > 0.0) do
+          create Iou with
+            issuer = currencyIssuer
+            owner = nft.properties.creator
+            amount = royaltyAmount
+            currency = currency
+            observers = []
+
+        -- 6. Deliver the NFT: create a new Nft contract for the buyer.
+        create Nft with
+          owner = buyer
+          registry = nft.registry
+          id = nft.id
+          properties = nft.properties
